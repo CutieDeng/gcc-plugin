@@ -5,6 +5,7 @@
 #include <tree-pass.h>
 #include <gimple-iterator.h>
 #include <context.h>
+#include <dumpfile.h>
 
 int plugin_is_GPL_compatible;
 
@@ -22,9 +23,13 @@ static void analyze_gimple_stmt(gimple *stmt) {
                 // 检查是否涉及指针
                 if (POINTER_TYPE_P(TREE_TYPE(lhs)) || POINTER_TYPE_P(TREE_TYPE(rhs))) {
                     fprintf(stderr, "  发现指针赋值: ");
-                    print_generic_expr(stderr, lhs, 0);
+                    if (DECL_P(lhs) && DECL_NAME(lhs)) {
+                        dump_generic_expr(stderr, TDF_NONE, lhs);
+                    }
                     fprintf(stderr, " = ");
-                    print_generic_expr(stderr, rhs, 0);
+                    if (DECL_P(rhs) && DECL_NAME(rhs)) {
+                        dump_generic_expr(stderr, TDF_NONE, rhs);
+                    }
                     fprintf(stderr, "\n");
                 }
             }
@@ -36,7 +41,9 @@ static void analyze_gimple_stmt(gimple *stmt) {
                 tree fn = gimple_call_fn(stmt);
                 if (fn) {
                     fprintf(stderr, "  函数调用: ");
-                    print_generic_expr(stderr, fn, 0);
+                    if (DECL_P(fn) && DECL_NAME(fn)) {
+                        dump_generic_expr(stderr, TDF_NONE, fn);
+                    }
                     fprintf(stderr, "\n");
                 }
             }
@@ -60,9 +67,11 @@ static void analyze_basic_block_basic(basic_block bb) {
 static unsigned int execute_ptr_access_pass(void) {
     if (!cfun) return 0;
     
-    fprintf(stderr, "分析函数: %s\n", 
-            (DECL_NAME(current_function_decl)) ? 
-            IDENTIFIER_POINTER(DECL_NAME(current_function_decl)) : "unknown");
+    const char *func_name = "unknown";
+    if (DECL_NAME(current_function_decl)) {
+        func_name = IDENTIFIER_POINTER(DECL_NAME(current_function_decl));
+    }
+    fprintf(stderr, "分析函数: %s\n", func_name);
     
     // 遍历所有基本块
     basic_block bb;
