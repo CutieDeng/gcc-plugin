@@ -3,11 +3,6 @@
 #include <tree.h>
 #include <gimple.h>
 #include <tree-pass.h>
-#include <gimple-iterator.h>
-#include <basic-block.h>
-#include <function.h>
-#include <gimple-expr.h>
-#include <tree-pretty-print.h>
 
 int plugin_is_GPL_compatible;
 
@@ -50,10 +45,8 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
-    pass_ptr_access *gimple_pass = new pass_ptr_access(g);
-    
     struct register_pass_info gimple_pass_info;
-    gimple_pass_info.pass = gimple_pass;
+    gimple_pass_info.pass = new pass_ptr_access(NULL);
     gimple_pass_info.reference_pass_name = "ssa";
     gimple_pass_info.ref_pass_instance_number = 1;
     gimple_pass_info.pos_op = PASS_POS_INSERT_AFTER;
@@ -66,6 +59,3 @@ int plugin_init(struct plugin_name_args *plugin_info,
 }
 
 // 插件信息
-struct plugin_gcc_version plugin_version = {
-    GCCPLUGIN_VERSION_MAJOR, GCCPLUGIN_VERSION_MINOR
-};
