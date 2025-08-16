@@ -73,7 +73,7 @@ struct access_tuple {
     access_tuple() {}
 };
 
-/* Main analyzer class */
+/* Main analyzer class - designed with trivial lifecycle */
 class pointer_access_analyzer {
 private:
     /* Container for collected access tuples */
@@ -84,10 +84,10 @@ private:
     unsigned int total_statements_analyzed;
     
 public:
-    /* Trivial constructor */
+    /* Trivial constructor - zero initialization */
     pointer_access_analyzer() : total_functions_analyzed(0), total_statements_analyzed(0) {}
     
-    /* Trivial destructor */
+    /* Trivial destructor - no cleanup needed */
     ~pointer_access_analyzer() {}
     
     /* Main analysis entry point */
@@ -417,24 +417,26 @@ void pointer_access_analyzer::print_results() const
     printf("=== END ANALYSIS RESULTS ===\n");
 }
 
-/* Global analyzer instance */
-static pointer_access_analyzer *global_analyzer = NULL;
-
-/* IPA pass execution function */
+/* IPA pass execution function - creates analyzer with local scope */
 static unsigned int execute_pointer_access_analysis(void)
 {
-    if (!global_analyzer) {
-        printf("Error: Analyzer not initialized\n");
-        return 1;
-    }
+    DEBUG_TRACE("Creating analyzer instance");
     
-    long long result = global_analyzer->analyze_compilation_unit();
+    /* Create analyzer instance with local scope - no global state */
+    pointer_access_analyzer analyzer;
+    
+    /* Execute analysis */
+    long long result = analyzer.analyze_compilation_unit();
     if (result != ERR_SUCCESS) {
         printf("Analysis failed with error code: %lld\n", result);
         return 1;
     }
     
-    global_analyzer->print_results();
+    /* Print results */
+    analyzer.print_results();
+    
+    DEBUG_TRACE("Analyzer instance destroyed");
+    /* Analyzer automatically destroyed when going out of scope */
     return 0;
 }
 
@@ -473,32 +475,16 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
-    /* Initialize global analyzer */
-    global_analyzer = new pointer_access_analyzer();
-    if (!global_analyzer) {
-        printf("Failed to create analyzer instance\n");
-        return 1;
-    }
-
-    /* Create and register the pass */
+    /* Create and register the pass - using first available IPA pass as reference */
     struct register_pass_info pass_info = {
         .pass = new pass_pointer_access_analysis(g),
-        .reference_pass_name = "ipa-cp",      /* Use a more reliable IPA pass reference */
+        .reference_pass_name = "*warn_unused_result",  /* Use a generic reference */
         .ref_pass_instance_number = 1,
         .pos_op = PASS_POS_INSERT_AFTER
     };
 
     register_callback(plugin_info->base_name, PLUGIN_PASS_MANAGER_SETUP,
                      NULL, &pass_info);
-
-    /* Register cleanup callback */
-    register_callback(plugin_info->base_name, PLUGIN_FINISH, 
-                     [](void *, void *) { 
-                         if (global_analyzer) {
-                             delete global_analyzer;
-                             global_analyzer = NULL;
-                         }
-                     }, NULL);
 
     printf("Pointer access analysis plugin initialized\n");
     return 0;
