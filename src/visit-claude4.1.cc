@@ -1,4 +1,3 @@
-// 必须按正确顺序包含头文件
 #include <gcc-plugin.h>
 #include <plugin-version.h>
 #include <tree.h>
@@ -13,8 +12,6 @@
 #include <attribs.h>
 #include <print-tree.h>
 #include <gimple-pretty-print.h>
-#include <tree-ssa-operands.h>
-#include <ssa-iterators.h>
 #include <tree-inline.h>
 #include <langhooks.h>
 #include <diagnostic-core.h>
@@ -326,7 +323,7 @@ static gimple* find_pointer_source_enhanced(tree ptr, access_info &info, int dep
     } else if (gimple_code(def_stmt) == GIMPLE_CALL) {
         // 处理函数调用返回值
         tree fn = gimple_call_fndecl(def_stmt);
-        if (fn) {
+        if (fn && DECL_NAME(fn)) {
             const char *fname = IDENTIFIER_POINTER(DECL_NAME(fn));
             // 检查是否是容器的数据访问函数
             if (strstr(fname, "data") || strstr(fname, "begin") || 
@@ -355,7 +352,7 @@ static gimple* find_pointer_source_enhanced(tree ptr, access_info &info, int dep
 // 分析函数调用中的STL容器访问
 static void analyze_call_stmt(gcall *call_stmt, function *fun) {
     tree fn = gimple_call_fndecl(call_stmt);
-    if (!fn) return;
+    if (!fn || !DECL_NAME(fn)) return;
     
     const char *fname = IDENTIFIER_POINTER(DECL_NAME(fn));
     
@@ -387,15 +384,6 @@ static void analyze_call_stmt(gcall *call_stmt, function *fun) {
                     
                     if (info.field_decl || info.is_stl_container) {
                         info.access_desc = std::string("STL container access via ") + fname;
-                        
-                        // 检查返回值的使用来判断读写类型
-                        tree lhs = gimple_call_lhs(call_stmt);
-                        if (lhs && TREE_CODE(lhs) == SSA_NAME) {
-                            // 简化的使用分析
-                            // 注意：完整的 use-def 链分析需要 SSA 形式
-                            info.acc_type = ACCESS_READ;
-                        }
-                        
                         collected_accesses.push_back(info);
                     }
                 }
@@ -675,7 +663,7 @@ int plugin_init(struct plugin_name_args *plugin_info,
     struct register_pass_info pass_info;
     pass_info.pass = new double_pointer_access_pass(g);
     pass_info.reference_pass_name = "optimized";  // 在优化后运行
-    pass_info.ref_pass_instance_number = 0;
+    pass_info.ref_pass_instance_number = 1;       // 使用1表示唯一实例
     pass_info.pos_op = PASS_POS_INSERT_AFTER;
     
     register_callback(plugin_name, PLUGIN_PASS_MANAGER_SETUP,
