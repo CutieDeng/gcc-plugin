@@ -14,6 +14,7 @@
 #include <print-tree.h>
 #include <internal-fn.h>
 #include <gimple-pretty-print.h>
+#include <context.h>
 
 /* Plugin licensing */
 int plugin_is_GPL_compatible;
@@ -80,6 +81,7 @@ static long long is_indirect_array_access(tree expr, tree *struct_type, tree *fi
 static long long find_related_member_access(tree base_expr, gimple **member_stmt);
 static const char *access_type_to_string(enum access_type type);
 static void print_access_tuple(const struct access_tuple *tuple);
+static unsigned int execute_pointer_access_analysis(void);
 
 /* Check if a tree node represents a pointer dereference followed by array access */
 static long long is_indirect_array_access(tree expr, tree *struct_type, tree *field_decl,
@@ -307,8 +309,8 @@ static unsigned int execute_pointer_access_analysis(void)
     
     struct cgraph_node *node;
     
-    /* Iterate through all functions in the compilation unit */
-    FOR_EACH_FUNCTION_WITH_BODY(node) {
+    /* Iterate through all functions with GIMPLE body in the compilation unit */
+    FOR_EACH_FUNCTION_WITH_GIMPLE_BODY(node) {
         struct function *func = DECL_STRUCT_FUNCTION(node->decl);
         if (!func) continue;
         
@@ -343,45 +345,30 @@ static unsigned int execute_pointer_access_analysis(void)
     return 0;
 }
 
-/* IPA pass definition */
-static struct ipa_opt_pass_d pass_pointer_access_analysis = {
-    {
-        IPA_PASS,
-        "pointer_access_analysis",           /* name */
-        OPTGROUP_NONE,                       /* optinfo_flags */
-        TV_IPA_OPT,                         /* tv_id */
-        0,                                   /* properties_required */
-        0,                                   /* properties_provided */
-        0,                                   /* properties_destroyed */
-        0,                                   /* todo_flags_start */
-        0,                                   /* todo_flags_finish */
-    },
-    NULL,                                    /* generate_summary */
-    NULL,                                    /* write_summary */
-    NULL,                                    /* read_summary */
-    NULL,                                    /* write_optimization_summary */
-    NULL,                                    /* read_optimization_summary */
-    NULL,                                    /* stmt_fixup */
-    0,                                       /* function_transform_todo_flags_start */
-    NULL,                                    /* function_transform */
-    NULL,                                    /* variable_transform */
-};
+/* Define the IPA pass structure */
+namespace {
+    const pass_data pass_data_pointer_access_analysis = {
+        SIMPLE_IPA_PASS,                    /* type */
+        "pointer_access_analysis",          /* name */
+        OPTGROUP_NONE,                      /* optinfo_flags */
+        TV_IPA_OPT,                        /* tv_id */
+        0,                                  /* properties_required */
+        0,                                  /* properties_provided */
+        0,                                  /* properties_destroyed */
+        0,                                  /* todo_flags_start */
+        0,                                  /* todo_flags_finish */
+    };
 
-/* Pass wrapper with execute function */
-static struct simple_ipa_opt_pass pass_wrapper = {
-    {
-        SIMPLE_IPA_PASS,
-        "pointer_access_wrapper",            /* name */
-        OPTGROUP_NONE,                       /* optinfo_flags */
-        TV_IPA_OPT,                         /* tv_id */
-        0,                                   /* properties_required */
-        0,                                   /* properties_provided */
-        0,                                   /* properties_destroyed */
-        0,                                   /* todo_flags_start */
-        0,                                   /* todo_flags_finish */
-    },
-    execute_pointer_access_analysis,         /* execute */
-};
+    class pass_pointer_access_analysis : public simple_ipa_opt_pass {
+    public:
+        pass_pointer_access_analysis(gcc::context *ctxt)
+            : simple_ipa_opt_pass(pass_data_pointer_access_analysis, ctxt) {}
+
+        virtual unsigned int execute(function *) override {
+            return execute_pointer_access_analysis();
+        }
+    };
+}
 
 /* Plugin initialization */
 int plugin_init(struct plugin_name_args *plugin_info,
@@ -393,9 +380,9 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
-    /* Register the pass */
+    /* Create and register the pass */
     struct register_pass_info pass_info = {
-        .pass = &pass_wrapper.pass,
+        .pass = new pass_pointer_access_analysis(g),
         .reference_pass_name = "whole-program",
         .ref_pass_instance_number = 1,
         .pos_op = PASS_POS_INSERT_AFTER
