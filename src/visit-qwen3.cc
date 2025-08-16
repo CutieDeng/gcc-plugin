@@ -5,7 +5,7 @@
 #include <tree-pass.h>
 #include <gimple-iterator.h>
 #include <context.h>
-#include <dumpfile.h>
+#include <print-tree.h>
 
 int plugin_is_GPL_compatible;
 
@@ -23,13 +23,9 @@ static void analyze_gimple_stmt(gimple *stmt) {
                 // 检查是否涉及指针
                 if (POINTER_TYPE_P(TREE_TYPE(lhs)) || POINTER_TYPE_P(TREE_TYPE(rhs))) {
                     fprintf(stderr, "  发现指针赋值: ");
-                    if (DECL_P(lhs) && DECL_NAME(lhs)) {
-                        dump_generic_expr(stderr, TDF_NONE, lhs);
-                    }
+                    print_generic_expr(stderr, lhs);
                     fprintf(stderr, " = ");
-                    if (DECL_P(rhs) && DECL_NAME(rhs)) {
-                        dump_generic_expr(stderr, TDF_NONE, rhs);
-                    }
+                    print_generic_expr(stderr, rhs);
                     fprintf(stderr, "\n");
                 }
             }
@@ -41,9 +37,7 @@ static void analyze_gimple_stmt(gimple *stmt) {
                 tree fn = gimple_call_fn(stmt);
                 if (fn) {
                     fprintf(stderr, "  函数调用: ");
-                    if (DECL_P(fn) && DECL_NAME(fn)) {
-                        dump_generic_expr(stderr, TDF_NONE, fn);
-                    }
+                    print_generic_expr(stderr, fn);
                     fprintf(stderr, "\n");
                 }
             }
