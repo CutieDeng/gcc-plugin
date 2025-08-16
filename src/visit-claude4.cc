@@ -445,10 +445,10 @@ static unsigned int execute_pointer_access_analysis(void)
 /* Define the IPA pass structure */
 namespace {
     const pass_data pass_data_pointer_access_analysis = {
-        SIMPLE_IPA_PASS,                    /* type */
+        IPA_PASS,                    /* type */
         "pointer_access_analysis",          /* name */
         OPTGROUP_NONE,                      /* optinfo_flags */
-        TV_IPA_OPT,                        /* tv_id */
+        TV_NONE,                        /* tv_id */
         0,                                  /* properties_required */
         0,                                  /* properties_provided */
         0,                                  /* properties_destroyed */
@@ -456,10 +456,20 @@ namespace {
         0,                                  /* todo_flags_finish */
     };
 
-    class pass_pointer_access_analysis : public simple_ipa_opt_pass {
+    class pass_pointer_access_analysis : public ipa_opt_pass_d {
     public:
         pass_pointer_access_analysis(gcc::context *ctxt)
-            : simple_ipa_opt_pass(pass_data_pointer_access_analysis, ctxt) {}
+            : ipa_opt_pass_d(pass_data_pointer_access_analysis, ctxt,
+                         NULL,  // generate_summary
+                         NULL,  // write_summary
+                         NULL,  // read_summary
+                         NULL,  // write_optimization_summary
+                         NULL,  // read_optimization_summary
+                         NULL,  // stmt_fixup
+                         0,     // function_transform_todo_flags_start
+                         NULL,  // function_transform
+                         NULL)  // variable_transform
+{}
 
         virtual unsigned int execute(function *) override {
             return execute_pointer_access_analysis();
@@ -480,8 +490,8 @@ int plugin_init(struct plugin_name_args *plugin_info,
     /* Register the pass without reference to other passes */
     struct register_pass_info pass_info = {
         .pass = new pass_pointer_access_analysis(g),
-        .reference_pass_name = NULL,        /* No reference pass - insert at end */
-        .ref_pass_instance_number = 0,
+        .reference_pass_name = "whole-program",        /* No reference pass - insert at end */
+        .ref_pass_instance_number = 1,
         .pos_op = PASS_POS_INSERT_AFTER
     };
 
