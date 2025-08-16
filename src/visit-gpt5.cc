@@ -108,16 +108,17 @@ struct ipa_analyzer_pass : simple_ipa_opt_pass {
     ipa_analyzer_pass(gcc::context *ctxt)
         : simple_ipa_opt_pass(ipa_pass_data, ctxt) {}
 
-    unsigned int execute(function *) override { return 0; }
-
-    void ipa_execute() override {
+    unsigned int execute(function *) override {
         Analyzer analyzer;
+        cgraph_node *node;
         FOR_EACH_DEFINED_FUNCTION(node) {
             if (!gimple_has_body_p(node->decl)) continue;
             analyzer.analyze_function(node);
         }
         analyzer.dump_results();
+        return 0;
     }
+
 };
 
 } // namespace
