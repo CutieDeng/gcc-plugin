@@ -1,0 +1,14 @@
+Double Pointer Access Plugin loaded successfully.
+
+=== Double Pointer Access Analysis Results ===
+Total accesses found: 1
+
+--- Access #1 ---
+Function: read2
+Struct Type: CompactPtr
+Field Name: elements
+Element Type: int
+Access Type: READ
+Location: test/read2.cc:12:25
+
+=== End of Analysis ===
