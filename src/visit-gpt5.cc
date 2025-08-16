@@ -13,13 +13,15 @@
 #include "stringpool.h"
 #include "vec.h"
 #include "hash-table.h"
+#include "symbol-summary.h"
+#include "ipa-pass.h"
 
 int plugin_is_GPL_compatible;
 
 #define DEBUG_PRINT(fmt, ...) \
     printf("[DEBUG][%s:%d] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 
-// ===== 错误码与宏定义 =====
+// ===== 错误码定义 =====
 enum AnalyzerErr {
     ERR_NONE                = 0,
     ERR_FRAMEWORK_LOGIC     = 1 << 0,
@@ -29,13 +31,12 @@ enum AnalyzerErr {
 };
 
 #define TRY(x) do { long long _e = (x); if (_e) { \
-    DEBUG_PRINT("TRY failed at %s:%d -> code=%lld", __FILE__, __LINE__, _e); \
+    DEBUG_PRINT("TRY failed -> code=%lld", _e); \
     return _e; } } while (0)
 
 #define TRY_WEAK(x) do { long long _e = (x); if (_e && _e != ERR_SOFT_ASSERT) { \
-    DEBUG_PRINT("TRY_WEAK failed at %s:%d -> code=%lld", __FILE__, __LINE__, _e); \
+    DEBUG_PRINT("TRY_WEAK failed -> code=%lld", _e); \
     return _e; } } while (0)
-
 
 // ===== 数据存储结构 =====
 struct AccessTuple {
@@ -73,7 +74,6 @@ public:
     }
 
     long long analyze_stmt(gimple *stmt) {
-        // 寻找 ARRAY_REF 或 COMPONENT_REF 嵌套 MEM_REF
         if (is_gimple_assign(stmt)) {
             tree lhs = gimple_assign_lhs(stmt);
             tree rhs = gimple_assign_rhs1(stmt);
@@ -84,7 +84,7 @@ public:
 
                 if (TREE_CODE(base) == COMPONENT_REF &&
                     TREE_CODE(TREE_OPERAND(base, 0)) == INDIRECT_REF) {
-                    tree ind = TREE_OPERAND(base, 0); // INDIRECT_REF
+                    tree ind = TREE_OPERAND(base, 0);
                     tree comp = base;
                     tree structtype = TREE_TYPE(TREE_OPERAND(ind, 0));
                     tree field = TREE_OPERAND(comp, 1);
@@ -96,7 +96,7 @@ public:
                     tup.element_type = elemtype;
                     tup.member_stmt = stmt;
                     tup.element_stmt = stmt;
-                    tup.rw_mode = classify_rw(stmt, lhs, rhs);
+                    tup.rw_mode = classify_rw(lhs, rhs);
 
                     results.safe_push(tup);
                 }
@@ -105,8 +105,7 @@ public:
         return ERR_NONE;
     }
 
-    int classify_rw(gimple *stmt, tree lhs, tree rhs) {
-        // 简单区分：如果 ARRAY_REF 在 lhs，则写，否则读
+    int classify_rw(tree lhs, tree rhs) {
         if (TREE_CODE(lhs) == ARRAY_REF)
             return 1;
         return 0;
@@ -116,52 +115,52 @@ public:
         for (unsigned i = 0; i < results.length(); ++i) {
             AccessTuple &t = results[i];
             printf("==== Access Tuple ====\n");
-            printf("StructType: %s\n", t->struct_type ? get_tree_code_name(TREE_CODE(t->struct_type)) : "(null)");
-            printf("Field: %s\n", t->field_decl ? get_tree_code_name(TREE_CODE(t->field_decl)) : "(null)");
-            printf("ElementType: %s\n", t->element_type ? get_tree_code_name(TREE_CODE(t->element_type)) : "(null)");
-            printf("RW Mode: %d\n", t->rw_mode);
+            if (t.struct_type) {
+                printf("StructType: %s\n", get_tree_code_name(TREE_CODE(t.struct_type)));
+            }
+            if (t.field_decl) {
+                printf("Field: %s\n", get_tree_code_name(TREE_CODE(t.field_decl)));
+            }
+            if (t.element_type) {
+                printf("ElementType: %s\n", get_tree_code_name(TREE_CODE(t.element_type)));
+            }
+            printf("RW Mode: %d\n", t.rw_mode);
             printf("Stmt:\n");
-            print_gimple_stmt(stdout, t->element_stmt, 0, 0);
+            print_gimple_stmt(stdout, t.element_stmt, 0, 0);
             printf("\n");
         }
     }
 };
 
-
-// ===== IPA Pass 定义 =====
+// ===== IPA Pass =====
 namespace {
-const pass_data ipa_pass_data = {
-    IPA_PASS, /* type */
-    "ptr_access_analyzer", /* name */
-    OPTGROUP_NONE, /* optinfo_flags */
-    TV_NONE, /* tv_id */
-    PROP_gimple_any, /* properties_required */
-    0, /* properties_provided */
-    0, /* properties_destroyed */
-    0, /* todo_flags_start */
-    0 /* todo_flags_finish */
+const ipa_opt_pass_data ipa_pass_data = {
+    .type = IPA_PASS,
+    .name = "ptr_access_analyzer",
+    .optinfo_flags = OPTGROUP_NONE,
+    .tv_id = TV_NONE,
+    .properties_required = PROP_gimple_any,
+    .properties_provided = 0,
+    .properties_destroyed = 0,
+    .todo_flags_start = 0,
+    .todo_flags_finish = 0,
 };
 
-struct ipa_analyzer_pass : ipa_opt_pass_d {
+struct ipa_analyzer_pass : simple_ipa_opt_pass {
     ipa_analyzer_pass(gcc::context *ctxt)
-        : ipa_opt_pass_d(ipa_pass_data, ctxt, nullptr, true) {}
+        : simple_ipa_opt_pass(ipa_pass_data, ctxt) {}
 
-    virtual unsigned int execute(function *fn) override {
-        // 不在 function 内部执行，放在 whole-program ipa_execute
-        return 0;
-    }
+    unsigned int execute(function *) override { return 0; }
 
-    virtual void ipa_execute(cgraph_node *) override {
+    void ipa_execute(cgraph_node *) override {
         Analyzer analyzer;
-        for (cgraph_node *node = cgraph_nodes; node; node = node->next) {
-            if (!gimple_has_body_p(node->decl))
+        FOR_EACH_DEFINED_FUNCTION(cnode) {
+            if (!gimple_has_body_p(cnode->decl))
                 continue;
-            analyzer.analyze_function(node);
+            analyzer.analyze_function(cnode);
         }
         analyzer.dump_results();
     }
-
-    virtual bool gate(function *) override { return true; }
 };
 } // namespace
 
@@ -173,8 +172,9 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
+    static ipa_analyzer_pass mypass(g);
     struct register_pass_info pass_info;
-    pass_info.pass = new ipa_analyzer_pass(g);
+    pass_info.pass = &mypass;
     pass_info.reference_pass_name = "whole-program";
     pass_info.ref_pass_instance_number = 1;
     pass_info.pos_op = PASS_POS_INSERT_AFTER;
