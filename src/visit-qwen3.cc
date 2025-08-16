@@ -6,7 +6,6 @@
 #include <gimple-iterator.h>
 #include <gimple-ssa.h>
 #include <vec.h>
-#include <hash-map.h>
 #include <basic-block.h>
 #include <function.h>
 #include <tree-ssa-alias.h>
@@ -15,8 +14,6 @@
 #include <print-tree.h>
 #include <stringpool.h>
 #include <cgraph.h>
-#include <ipa-prop.h>
-#include <context.h>
 
 int plugin_is_GPL_compatible;
 
@@ -38,35 +35,6 @@ struct access_info {
 
 // 向量存储所有访问信息
 static vec<access_info *> access_records;
-
-// 获取访问类型
-static enum access_type get_access_type(gimple *stmt) {
-    if (gimple_assign_single_p(stmt)) {
-        tree lhs = gimple_assign_lhs(stmt);
-        if (lhs && TREE_CODE(lhs) == INDIRECT_REF) {
-            return ACCESS_WRITE;
-        }
-    } else if (gimple_assign_copy_p(stmt)) {
-        tree rhs = gimple_assign_rhs1(stmt);
-        if (rhs && TREE_CODE(rhs) == INDIRECT_REF) {
-            return ACCESS_READ;
-        }
-    } else if (gimple_call_p(stmt)) {
-        // 处理函数调用中的参数传递
-        for (unsigned i = 0; i < gimple_call_num_args(stmt); i++) {
-            tree arg = gimple_call_arg(stmt, i);
-            if (TREE_CODE(arg) == ADDR_EXPR) {
-                tree operand = TREE_OPERAND(arg, 0);
-                if (TREE_CODE(operand) == INDIRECT_REF) {
-                    return ACCESS_READ;
-                }
-            } else if (TREE_CODE(arg) == INDIRECT_REF) {
-                return ACCESS_READ;
-            }
-        }
-    }
-    return ACCESS_READ; // 默认为读取
-}
 
 // 检查是否为结构体指针的成员访问
 static bool is_struct_member_access(gimple *stmt, tree *struct_type, tree *field, tree *accessed_ptr) {
@@ -102,24 +70,43 @@ static bool is_struct_member_access(gimple *stmt, tree *struct_type, tree *field
 
 // 获取SSA_NAME的定义语句
 static gimple *get_def_stmt(tree var) {
-    if (TREE_CODE(var) != SSA_NAME)
+    if (!var || TREE_CODE(var) != SSA_NAME)
         return NULL;
     return SSA_NAME_DEF_STMT(var);
 }
 
-// 检查两个变量是否指向同一个值
-static bool vars_equal(tree var1, tree var2) {
-    if (var1 == var2)
-        return true;
+// 检查两个变量是否相关（指向同一值或通过赋值链相连）
+static bool vars_related(tree var1, tree var2) {
     if (!var1 || !var2)
         return false;
+        
+    if (var1 == var2)
+        return true;
+        
     if (TREE_CODE(var1) != SSA_NAME || TREE_CODE(var2) != SSA_NAME)
         return false;
     
+    // 简单的直接比较
     gimple *def1 = get_def_stmt(var1);
     gimple *def2 = get_def_stmt(var2);
     
-    return def1 == def2;
+    if (def1 == def2)
+        return true;
+        
+    // 检查是否有直接的赋值关系
+    if (def1 && gimple_assign_single_p(def1)) {
+        tree def1_rhs = gimple_assign_rhs1(def1);
+        if (def1_rhs == var2)
+            return true;
+    }
+    
+    if (def2 && gimple_assign_single_p(def2)) {
+        tree def2_rhs = gimple_assign_rhs1(def2);
+        if (def2_rhs == var1)
+            return true;
+    }
+    
+    return false;
 }
 
 // 分析指针访问的后续使用
@@ -146,6 +133,8 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
             continue;
         }
 
+        bool found = false;
+        
         // 检查赋值语句的左右操作数
         if (gimple_assign_single_p(stmt)) {
             tree lhs = gimple_assign_lhs(stmt);
@@ -154,7 +143,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
             // 检查写入操作: *ptr = value
             if (lhs && TREE_CODE(lhs) == INDIRECT_REF) {
                 tree ref_ptr = TREE_OPERAND(lhs, 0);
-                if (ref_ptr && vars_equal(ref_ptr, ptr_var)) {
+                if (ref_ptr && vars_related(ref_ptr, ptr_var)) {
                     access_info *info = new access_info();
                     info->struct_type = struct_type;
                     info->field = field;
@@ -163,14 +152,14 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
                     info->element_access_stmt = stmt;
                     info->access_kind = ACCESS_WRITE;
                     access_records.safe_push(info);
-                    break; // 找到一次就停止
+                    found = true;
                 }
             }
             
             // 检查读取操作: value = *ptr
             if (rhs && TREE_CODE(rhs) == INDIRECT_REF) {
                 tree ref_ptr = TREE_OPERAND(rhs, 0);
-                if (ref_ptr && vars_equal(ref_ptr, ptr_var)) {
+                if (ref_ptr && vars_related(ref_ptr, ptr_var)) {
                     access_info *info = new access_info();
                     info->struct_type = struct_type;
                     info->field = field;
@@ -179,7 +168,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
                     info->element_access_stmt = stmt;
                     info->access_kind = ACCESS_READ;
                     access_records.safe_push(info);
-                    break; // 找到一次就停止
+                    found = true;
                 }
             }
         }
@@ -190,7 +179,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
                 tree arg = gimple_call_arg(stmt, i);
                 if (arg && TREE_CODE(arg) == INDIRECT_REF) {
                     tree ref_ptr = TREE_OPERAND(arg, 0);
-                    if (ref_ptr && vars_equal(ref_ptr, ptr_var)) {
+                    if (ref_ptr && vars_related(ref_ptr, ptr_var)) {
                         access_info *info = new access_info();
                         info->struct_type = struct_type;
                         info->field = field;
@@ -199,12 +188,17 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
                         info->element_access_stmt = stmt;
                         info->access_kind = ACCESS_READ;
                         access_records.safe_push(info);
-                        break; // 找到一次就停止
+                        found = true;
+                        break;
                     }
                 }
             }
         }
 
+        if (found) {
+            break; // 找到一次访问就停止
+        }
+        
         gsi_next(&next_gsi);
     }
 }
@@ -212,10 +206,6 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
 // 分析函数中的二级指针访问
 static void analyze_function_access(function *fn) {
     if (!fn || !fn->gimple_body)
-        return;
-
-    // 确保函数体已构建
-    if (gimple_in_ssa_p(fn))
         return;
 
     basic_block bb;
@@ -247,11 +237,11 @@ static void print_access_records(void) {
         
         fprintf(stderr, "\n记录 %u:\n", i + 1);
         fprintf(stderr, "  结构体类型: ");
-        if (TYPE_NAME(info->struct_type)) {
+        if (info->struct_type && TYPE_NAME(info->struct_type)) {
             if (TREE_CODE(TYPE_NAME(info->struct_type)) == IDENTIFIER_NODE) {
                 fprintf(stderr, "%s", IDENTIFIER_POINTER(TYPE_NAME(info->struct_type)));
             } else if (TREE_CODE(TYPE_NAME(info->struct_type)) == TYPE_DECL) {
-                tree name = DECL_NAME(TYPE_DECL(info->struct_type));
+                tree name = DECL_NAME(TYPE_DECL_CHECK(TYPE_NAME(info->struct_type)));
                 if (name) {
                     fprintf(stderr, "%s", IDENTIFIER_POINTER(name));
                 } else {
@@ -266,15 +256,21 @@ static void print_access_records(void) {
         fprintf(stderr, "\n");
         
         fprintf(stderr, "  字段: ");
-        if (DECL_NAME(info->field)) {
+        if (info->field && DECL_NAME(info->field)) {
             fprintf(stderr, "%s", IDENTIFIER_POINTER(DECL_NAME(info->field)));
         } else {
             fprintf(stderr, "<unnamed>");
         }
         fprintf(stderr, "\n");
         
-        fprintf(stderr, "  元素类型: %s\n", 
-                get_tree_code_name(TREE_CODE(info->element_type)));
+        fprintf(stderr, "  元素类型: ");
+        if (info->element_type) {
+            fprintf(stderr, "%s", get_tree_code_name(TREE_CODE(info->element_type)));
+        } else {
+            fprintf(stderr, "<unknown>");
+        }
+        fprintf(stderr, "\n");
+        
         fprintf(stderr, "  访问类型: %s\n", 
                 info->access_kind == ACCESS_WRITE ? "写入" : "读取");
         
@@ -296,26 +292,8 @@ static unsigned int execute_ptr_access_pass(void) {
     return 0;
 }
 
-// PASS定义
-static struct register_pass_info ptr_access_pass_info;
-
-// IPA PASS执行函数
-static unsigned int execute_ipa_ptr_access_pass(void) {
-    struct cgraph_node *node;
-    
-    // 清空之前的记录
-    access_records.truncate(0);
-    
-    // 遍历所有函数
-    FOR_EACH_FUNCTION(node) {
-        function *fn = node->get_fun();
-        if (fn && fn->gimple_body) {
-            push_cfun(fn);
-            analyze_function_access(fn);
-            pop_cfun();
-        }
-    }
-    
+// 清理函数
+static void finish_ptr_access_plugin(void *) {
     // 打印结果
     print_access_records();
     
@@ -324,8 +302,6 @@ static unsigned int execute_ipa_ptr_access_pass(void) {
         delete access_records[i];
     }
     access_records.truncate(0);
-    
-    return 0;
 }
 
 // GIMPLE PASS定义
@@ -378,6 +354,7 @@ __visible int plugin_init(struct plugin_name_args *plugin_info,
     gimple_pass_info.pos_op = PASS_POS_INSERT_AFTER;
     
     register_callback(plugin_info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &gimple_pass_info);
+    register_callback(plugin_info->base_name, PLUGIN_FINISH, finish_ptr_access_plugin, NULL);
     
     fprintf(stderr, "GCC指针访问分析插件已加载\n");
     
