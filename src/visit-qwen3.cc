@@ -5,7 +5,7 @@
 #include <tree-pass.h>
 #include <gimple-iterator.h>
 #include <context.h>
-#include <print-tree.h>
+#include <tree-pretty-print.h>
 
 int plugin_is_GPL_compatible;
 
