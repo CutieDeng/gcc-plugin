@@ -69,8 +69,9 @@ struct access_tuple {
     gimple *element_access_stmt; /* Statement accessing the element */
     enum access_type access_mode; /* Read or write access */
     
-    /* Trivial constructor for zero-overhead initialization */
-    access_tuple() {}
+    /* Default constructor */
+    access_tuple() : struct_type(NULL), field_decl(NULL), pointed_element_type(NULL),
+                    member_access_stmt(NULL), element_access_stmt(NULL), access_mode(ACCESS_READ) {}
 };
 
 /* Main analyzer class - designed with trivial lifecycle */
@@ -84,11 +85,16 @@ private:
     unsigned int total_statements_analyzed;
     
 public:
-    /* Trivial constructor - zero initialization */
-    pointer_access_analyzer() : total_functions_analyzed(0), total_statements_analyzed(0) {}
+    /* Constructor */
+    pointer_access_analyzer() : total_functions_analyzed(0), total_statements_analyzed(0) {
+        DEBUG_TRACE("Analyzer created");
+    }
     
-    /* Trivial destructor - no cleanup needed */
-    ~pointer_access_analyzer() {}
+    /* Destructor */
+    ~pointer_access_analyzer() {
+        DEBUG_TRACE("Analyzer destroyed, analyzed %u functions, %u statements", 
+                   total_functions_analyzed, total_statements_analyzed);
+    }
     
     /* Main analysis entry point */
     long long analyze_compilation_unit();
@@ -145,8 +151,8 @@ long long pointer_access_analyzer::analyze_function(struct cgraph_node *node)
         return ERR_WEAK_ASSERTION;
     }
     
-    DEBUG_TRACE("Analyzing function: %s", 
-               IDENTIFIER_POINTER(DECL_NAME(node->decl)));
+    const char *func_name = IDENTIFIER_POINTER(DECL_NAME(node->decl));
+    DEBUG_TRACE("Analyzing function: %s", func_name ? func_name : "<unnamed>");
     
     total_functions_analyzed++;
     
@@ -168,6 +174,8 @@ long long pointer_access_analyzer::analyze_basic_block(basic_block bb)
     gimple_stmt_iterator gsi;
     for (gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi)) {
         gimple *stmt = gsi_stmt(gsi);
+        if (!stmt) continue;
+        
         total_statements_analyzed++;
         
         long long result = analyze_gimple_stmt(stmt);
@@ -254,7 +262,6 @@ long long pointer_access_analyzer::is_indirect_array_access(tree expr, tree *str
                                                            tree *element_type, enum access_type *access_mode)
 {
     if (!expr) {
-        DEBUG_TRACE("NULL expression");
         return ERR_INVALID_INPUT;
     }
 
@@ -341,10 +348,6 @@ long long pointer_access_analyzer::add_access_tuple(tree struct_type, tree field
     tuple.member_access_stmt = member_stmt;
     tuple.element_access_stmt = element_stmt;
     tuple.access_mode = mode;
-    
-    if (!collected_accesses.space(1)) {
-        return ERR_MEMORY;
-    }
     
     collected_accesses.safe_push(tuple);
     return ERR_SUCCESS;
@@ -435,8 +438,7 @@ static unsigned int execute_pointer_access_analysis(void)
     /* Print results */
     analyzer.print_results();
     
-    DEBUG_TRACE("Analyzer instance destroyed");
-    /* Analyzer automatically destroyed when going out of scope */
+    DEBUG_TRACE("Analysis completed successfully");
     return 0;
 }
 
@@ -475,17 +477,17 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
-    /* Create and register the pass - using first available IPA pass as reference */
+    /* Register the pass without reference to other passes */
     struct register_pass_info pass_info = {
         .pass = new pass_pointer_access_analysis(g),
-        .reference_pass_name = "*warn_unused_result",  /* Use a generic reference */
-        .ref_pass_instance_number = 1,
+        .reference_pass_name = NULL,        /* No reference pass - insert at end */
+        .ref_pass_instance_number = 0,
         .pos_op = PASS_POS_INSERT_AFTER
     };
 
     register_callback(plugin_info->base_name, PLUGIN_PASS_MANAGER_SETUP,
                      NULL, &pass_info);
 
-    printf("Pointer access analysis plugin initialized\n");
+    printf("Pointer access analysis plugin initialized successfully\n");
     return 0;
 }
