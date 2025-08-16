@@ -28,8 +28,8 @@ struct access_info {
     tree struct_type;           // 结构体类型
     tree field;                 // 字段
     tree element_type;          // 指针所指向元素的类型
-    gimple *member_access_stmt; // 访问成员的gimple语句
-    gimple *element_access_stmt;// 访问元素的gimple语句
+    gimple_stmt member_access_stmt; // 访问成员的gimple语句
+    gimple_stmt element_access_stmt;// 访问元素的gimple语句
     enum access_type access_kind; // 访问类型
 };
 
@@ -37,8 +37,8 @@ struct access_info {
 static vec<access_info *> access_records;
 
 // 检查是否为结构体指针的成员访问
-static bool is_struct_member_access(gimple *stmt, tree *struct_type, tree *field, tree *accessed_ptr) {
-    if (!stmt || !gimple_assign_single_p(stmt))
+static bool is_struct_member_access(gimple stmt, tree *struct_type, tree *field, tree *accessed_ptr) {
+    if (!stmt || !is_gimple_assign(stmt))
         return false;
 
     tree lhs = gimple_assign_lhs(stmt);
@@ -69,7 +69,7 @@ static bool is_struct_member_access(gimple *stmt, tree *struct_type, tree *field
 }
 
 // 获取SSA_NAME的定义语句
-static gimple *get_def_stmt(tree var) {
+static gimple get_def_stmt(tree var) {
     if (!var || TREE_CODE(var) != SSA_NAME)
         return NULL;
     return SSA_NAME_DEF_STMT(var);
@@ -87,20 +87,20 @@ static bool vars_related(tree var1, tree var2) {
         return false;
     
     // 简单的直接比较
-    gimple *def1 = get_def_stmt(var1);
-    gimple *def2 = get_def_stmt(var2);
+    gimple def1 = get_def_stmt(var1);
+    gimple def2 = get_def_stmt(var2);
     
     if (def1 == def2)
         return true;
         
     // 检查是否有直接的赋值关系
-    if (def1 && gimple_assign_single_p(def1)) {
+    if (def1 && is_gimple_assign(def1)) {
         tree def1_rhs = gimple_assign_rhs1(def1);
         if (def1_rhs == var2)
             return true;
     }
     
-    if (def2 && gimple_assign_single_p(def2)) {
+    if (def2 && is_gimple_assign(def2)) {
         tree def2_rhs = gimple_assign_rhs1(def2);
         if (def2_rhs == var1)
             return true;
@@ -110,7 +110,7 @@ static bool vars_related(tree var1, tree var2) {
 }
 
 // 分析指针访问的后续使用
-static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt, 
+static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple member_stmt, 
                                   tree struct_type, tree field, tree ptr_var) {
     if (!ptr_var || TREE_CODE(ptr_var) != SSA_NAME)
         return;
@@ -127,7 +127,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
     gsi_next(&next_gsi); // 从下一条语句开始
     
     while (!gsi_end_p(next_gsi)) {
-        gimple *stmt = gsi_stmt(next_gsi);
+        gimple stmt = gsi_stmt(next_gsi);
         if (!stmt) {
             gsi_next(&next_gsi);
             continue;
@@ -136,7 +136,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
         bool found = false;
         
         // 检查赋值语句的左右操作数
-        if (gimple_assign_single_p(stmt)) {
+        if (is_gimple_assign(stmt)) {
             tree lhs = gimple_assign_lhs(stmt);
             tree rhs = gimple_assign_rhs1(stmt);
             
@@ -174,8 +174,9 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
         }
         
         // 检查函数调用中的参数
-        if (gimple_call_p(stmt)) {
-            for (unsigned i = 0; i < gimple_call_num_args(stmt); i++) {
+        if (gimple_code(stmt) == GIMPLE_CALL) {
+            unsigned int nargs = gimple_call_num_args(stmt);
+            for (unsigned i = 0; i < nargs; i++) {
                 tree arg = gimple_call_arg(stmt, i);
                 if (arg && TREE_CODE(arg) == INDIRECT_REF) {
                     tree ref_ptr = TREE_OPERAND(arg, 0);
@@ -204,7 +205,7 @@ static void analyze_pointer_usage(gimple_stmt_iterator gsi, gimple *member_stmt,
 }
 
 // 分析函数中的二级指针访问
-static void analyze_function_access(function *fn) {
+static void analyze_function_access(struct function *fn) {
     if (!fn || !fn->gimple_body)
         return;
 
@@ -212,7 +213,7 @@ static void analyze_function_access(function *fn) {
     FOR_EACH_BB_FN(bb, fn) {
         gimple_stmt_iterator gsi;
         for (gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi)) {
-            gimple *stmt = gsi_stmt(gsi);
+            gimple stmt = gsi_stmt(gsi);
             
             tree struct_type = NULL_TREE;
             tree field = NULL_TREE;
@@ -241,9 +242,9 @@ static void print_access_records(void) {
             if (TREE_CODE(TYPE_NAME(info->struct_type)) == IDENTIFIER_NODE) {
                 fprintf(stderr, "%s", IDENTIFIER_POINTER(TYPE_NAME(info->struct_type)));
             } else if (TREE_CODE(TYPE_NAME(info->struct_type)) == TYPE_DECL) {
-                tree name = DECL_NAME(TYPE_DECL_CHECK(TYPE_NAME(info->struct_type)));
-                if (name) {
-                    fprintf(stderr, "%s", IDENTIFIER_POINTER(name));
+                tree decl = TYPE_NAME(info->struct_type);
+                if (TREE_CODE(decl) == TYPE_DECL && DECL_NAME(decl)) {
+                    fprintf(stderr, "%s", IDENTIFIER_POINTER(DECL_NAME(decl)));
                 } else {
                     fprintf(stderr, "<unnamed>");
                 }
@@ -275,10 +276,10 @@ static void print_access_records(void) {
                 info->access_kind == ACCESS_WRITE ? "写入" : "读取");
         
         fprintf(stderr, "  成员访问语句: ");
-        print_gimple_stmt(stderr, info->member_access_stmt, 0, TDF_VOPS);
+        print_gimple_stmt(stderr, info->member_access_stmt, 0);
         
         fprintf(stderr, "  元素访问语句: ");
-        print_gimple_stmt(stderr, info->element_access_stmt, 0, TDF_VOPS);
+        print_gimple_stmt(stderr, info->element_access_stmt, 0);
     }
     fprintf(stderr, "\n");
 }
@@ -335,8 +336,8 @@ public:
 } // namespace
 
 // 插件初始化函数
-__visible int plugin_init(struct plugin_name_args *plugin_info,
-                         struct plugin_gcc_version *version) {
+int plugin_init(struct plugin_name_args *plugin_info,
+                struct plugin_gcc_version *version) {
     // 版本检查
     if (!plugin_default_version_check(version, &gcc_version)) {
         error("插件版本不兼容");
@@ -362,6 +363,6 @@ __visible int plugin_init(struct plugin_name_args *plugin_info,
 }
 
 // 插件信息
-__visible struct plugin_gcc_version plugin_version = {
+struct plugin_gcc_version plugin_version = {
     GCCPLUGIN_VERSION_MAJOR, GCCPLUGIN_VERSION_MINOR
 };
