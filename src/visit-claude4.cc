@@ -264,7 +264,8 @@ long long pointer_access_analyzer::analyze_gimple_stmt(gimple *stmt)
             break;
         }
         case GIMPLE_RETURN: {
-            tree retval = gimple_return_retval(stmt);
+            greturn *stmt_greturn = as_a <greturn *> (stmt);
+            tree retval = gimple_return_retval(stmt_greturn);
             if (retval) {
                 TRY_WEAK(analyze_expression_tree(retval, stmt, ACCESS_READ));
             }
