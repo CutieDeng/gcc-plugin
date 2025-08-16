@@ -1,3 +1,4 @@
+// 必须按正确顺序包含头文件
 #include <gcc-plugin.h>
 #include <plugin-version.h>
 #include <tree.h>
@@ -7,18 +8,16 @@
 #include <gimple-iterator.h>
 #include <gimple-walk.h>
 #include <cgraph.h>
-#include <diagnostic.h>
-#include <print-tree.h>
 #include <tree-cfg.h>
 #include <stringpool.h>
 #include <attribs.h>
-#include <vec.h>
-#include <hash-map.h>
-#include <hash-set.h>
+#include <print-tree.h>
 #include <gimple-pretty-print.h>
+#include <tree-ssa-operands.h>
+#include <ssa-iterators.h>
 #include <tree-inline.h>
 #include <langhooks.h>
-#include <cp/cp-tree.h>
+#include <diagnostic-core.h>
 
 #include <iostream>
 #include <vector>
@@ -391,19 +390,10 @@ static void analyze_call_stmt(gcall *call_stmt, function *fun) {
                         
                         // 检查返回值的使用来判断读写类型
                         tree lhs = gimple_call_lhs(call_stmt);
-                        if (lhs) {
-                            // 进一步分析返回值如何被使用
-                            imm_use_iterator iter;
-                            use_operand_p use_p;
-                            FOR_EACH_IMM_USE_FAST(use_p, iter, lhs) {
-                                gimple *use_stmt = USE_STMT(use_p);
-                                if (gimple_code(use_stmt) == GIMPLE_ASSIGN) {
-                                    if (gimple_assign_lhs(use_stmt) == lhs) {
-                                        info.acc_type = ACCESS_WRITE;
-                                        break;
-                                    }
-                                }
-                            }
+                        if (lhs && TREE_CODE(lhs) == SSA_NAME) {
+                            // 简化的使用分析
+                            // 注意：完整的 use-def 链分析需要 SSA 形式
+                            info.acc_type = ACCESS_READ;
                         }
                         
                         collected_accesses.push_back(info);
