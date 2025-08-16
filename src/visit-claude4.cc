@@ -60,18 +60,31 @@ enum access_type {
     ACCESS_WRITE = 1
 };
 
+/* Pattern type enumeration */
+enum pattern_type {
+    PATTERN_DIRECT_ARRAY,      /* Direct array access: arr[i] */
+    PATTERN_POINTER_DEREF,     /* Pointer dereference: *ptr */
+    PATTERN_MEMBER_ARRAY,      /* Member array access: obj.arr[i] */
+    PATTERN_MEMBER_POINTER,    /* Member pointer access: obj.ptr */
+    PATTERN_INDIRECT_ARRAY,    /* Indirect array access: obj.ptr[i] */
+    PATTERN_UNKNOWN
+};
+
 /* Data structure to represent collected access patterns */
 struct access_tuple {
-    tree struct_type;           /* The structure type */
-    tree field_decl;           /* The field declaration */
+    tree struct_type;           /* The structure type (if applicable) */
+    tree field_decl;           /* The field declaration (if applicable) */
     tree pointed_element_type;  /* Type of the pointed element */
-    gimple *member_access_stmt; /* Statement accessing the member */
-    gimple *element_access_stmt; /* Statement accessing the element */
+    tree base_expr;            /* Base expression */
+    tree access_expr;          /* Full access expression */
+    gimple *stmt;              /* Statement containing the access */
     enum access_type access_mode; /* Read or write access */
+    enum pattern_type pattern;  /* Type of access pattern */
     
     /* Default constructor */
     access_tuple() : struct_type(NULL), field_decl(NULL), pointed_element_type(NULL),
-                    member_access_stmt(NULL), element_access_stmt(NULL), access_mode(ACCESS_READ) {}
+                    base_expr(NULL), access_expr(NULL), stmt(NULL), 
+                    access_mode(ACCESS_READ), pattern(PATTERN_UNKNOWN) {}
 };
 
 /* Main analyzer class - designed with trivial lifecycle */
@@ -83,17 +96,21 @@ private:
     /* Statistics */
     unsigned int total_functions_analyzed;
     unsigned int total_statements_analyzed;
+    unsigned int total_array_accesses;
+    unsigned int total_pointer_accesses;
     
 public:
     /* Constructor */
-    pointer_access_analyzer() : total_functions_analyzed(0), total_statements_analyzed(0) {
+    pointer_access_analyzer() : total_functions_analyzed(0), total_statements_analyzed(0),
+                               total_array_accesses(0), total_pointer_accesses(0) {
         DEBUG_TRACE("Analyzer created");
     }
     
     /* Destructor */
     ~pointer_access_analyzer() {
-        DEBUG_TRACE("Analyzer destroyed, analyzed %u functions, %u statements", 
-                   total_functions_analyzed, total_statements_analyzed);
+        DEBUG_TRACE("Analyzer destroyed, analyzed %u functions, %u statements, found %u array accesses, %u pointer accesses", 
+                   total_functions_analyzed, total_statements_analyzed, 
+                   total_array_accesses, total_pointer_accesses);
     }
     
     /* Main analysis entry point */
@@ -108,17 +125,22 @@ private:
     long long analyze_basic_block(basic_block bb);
     long long analyze_gimple_stmt(gimple *stmt);
     
-    /* Pattern detection methods */
-    long long extract_pointer_access_pattern(gimple *stmt, tree lhs, tree rhs);
-    long long is_indirect_array_access(tree expr, tree *struct_type, tree *field_decl, 
-                                     tree *element_type, enum access_type *access_mode);
-    long long find_related_member_access(tree base_expr, gimple **member_stmt);
+    /* Enhanced pattern detection methods */
+    long long analyze_expression_tree(tree expr, gimple *stmt, enum access_type access_mode);
+    long long analyze_array_access(tree expr, gimple *stmt, enum access_type access_mode);
+    long long analyze_pointer_access(tree expr, gimple *stmt, enum access_type access_mode);
+    long long analyze_component_ref(tree expr, gimple *stmt, enum access_type access_mode);
+    long long analyze_mem_ref(tree expr, gimple *stmt, enum access_type access_mode);
     
     /* Utility methods */
     const char *access_type_to_string(enum access_type type) const;
+    const char *pattern_type_to_string(enum pattern_type type) const;
     void print_access_tuple(const access_tuple *tuple) const;
-    long long add_access_tuple(tree struct_type, tree field_decl, tree element_type,
-                              gimple *member_stmt, gimple *element_stmt, enum access_type mode);
+    void print_tree_debug(tree expr, const char *prefix) const;
+    long long add_access_tuple(const access_tuple &tuple);
+    bool is_struct_type(tree type) const;
+    bool is_pointer_type(tree type) const;
+    bool is_array_type(tree type) const;
 };
 
 /* Main analysis entry point */
@@ -194,163 +216,323 @@ long long pointer_access_analyzer::analyze_gimple_stmt(gimple *stmt)
         return ERR_INVALID_INPUT;
     }
 
+    /* Debug: print the statement */
+    DEBUG_TRACE("Analyzing statement:");
+    print_gimple_stmt(stdout, stmt, 0, TDF_SLIM);
+
     switch (gimple_code(stmt)) {
         case GIMPLE_ASSIGN: {
             tree lhs = gimple_assign_lhs(stmt);
             tree rhs = gimple_assign_rhs1(stmt);
-            TRY_WEAK(extract_pointer_access_pattern(stmt, lhs, rhs));
+            
+            /* Analyze LHS (write access) */
+            if (lhs) {
+                TRY_WEAK(analyze_expression_tree(lhs, stmt, ACCESS_WRITE));
+            }
+            
+            /* Analyze RHS (read access) */
+            if (rhs) {
+                TRY_WEAK(analyze_expression_tree(rhs, stmt, ACCESS_READ));
+            }
+            
+            /* Handle multi-operand assignments */
+            if (gimple_num_ops(stmt) > 2) {
+                for (unsigned i = 2; i < gimple_num_ops(stmt); i++) {
+                    tree op = gimple_op(stmt, i);
+                    if (op) {
+                        TRY_WEAK(analyze_expression_tree(op, stmt, ACCESS_READ));
+                    }
+                }
+            }
             break;
         }
         case GIMPLE_CALL: {
-            /* Handle function calls that might involve indirect access */
+            /* Analyze function call arguments */
             unsigned num_args = gimple_call_num_args(stmt);
             for (unsigned i = 0; i < num_args; i++) {
                 tree arg = gimple_call_arg(stmt, i);
-                TRY_WEAK(extract_pointer_access_pattern(stmt, NULL, arg));
+                if (arg) {
+                    TRY_WEAK(analyze_expression_tree(arg, stmt, ACCESS_READ));
+                }
+            }
+            
+            /* Analyze return value if assigned */
+            tree lhs = gimple_call_lhs(stmt);
+            if (lhs) {
+                TRY_WEAK(analyze_expression_tree(lhs, stmt, ACCESS_WRITE));
+            }
+            break;
+        }
+        case GIMPLE_RETURN: {
+            tree retval = gimple_return_retval(stmt);
+            if (retval) {
+                TRY_WEAK(analyze_expression_tree(retval, stmt, ACCESS_READ));
             }
             break;
         }
         default:
-            /* Other statement types not relevant for our analysis */
+            /* Other statement types might also contain relevant expressions */
             break;
     }
 
     return ERR_SUCCESS;
 }
 
-/* Extract access pattern from assignment statements */
-long long pointer_access_analyzer::extract_pointer_access_pattern(gimple *stmt, tree lhs, tree rhs)
-{
-    if (!stmt) {
-        return ERR_INVALID_INPUT;
-    }
-
-    tree struct_type = NULL;
-    tree field_decl = NULL;
-    tree element_type = NULL;
-    enum access_type access_mode;
-    
-    /* Check LHS (write access) */
-    if (lhs) {
-        long long result = is_indirect_array_access(lhs, &struct_type, &field_decl, 
-                                                   &element_type, &access_mode);
-        if (result == ERR_SUCCESS) {
-            access_mode = ACCESS_WRITE;
-            TRY(add_access_tuple(struct_type, field_decl, element_type, 
-                               stmt, stmt, access_mode));
-            DEBUG_TRACE("Collected write access pattern");
-        }
-    }
-    
-    /* Check RHS (read access) */
-    if (rhs) {
-        long long result = is_indirect_array_access(rhs, &struct_type, &field_decl,
-                                                   &element_type, &access_mode);
-        if (result == ERR_SUCCESS) {
-            access_mode = ACCESS_READ;
-            TRY(add_access_tuple(struct_type, field_decl, element_type, 
-                               stmt, stmt, access_mode));
-            DEBUG_TRACE("Collected read access pattern");
-        }
-    }
-    
-    return ERR_SUCCESS;
-}
-
-/* Check if a tree node represents a pointer dereference followed by array access */
-long long pointer_access_analyzer::is_indirect_array_access(tree expr, tree *struct_type, tree *field_decl,
-                                                           tree *element_type, enum access_type *access_mode)
+/* Enhanced expression tree analysis */
+long long pointer_access_analyzer::analyze_expression_tree(tree expr, gimple *stmt, enum access_type access_mode)
 {
     if (!expr) {
         return ERR_INVALID_INPUT;
     }
 
-    /* Look for ARRAY_REF pattern */
-    if (TREE_CODE(expr) != ARRAY_REF) {
-        return ERR_WEAK_ASSERTION;
-    }
+    /* Debug output */
+    DEBUG_TRACE("Analyzing expression tree (access_mode: %s):", access_type_to_string(access_mode));
+    print_tree_debug(expr, "  ");
 
-    tree array_base = TREE_OPERAND(expr, 0);
-    if (!array_base) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    /* Check if the array base is an indirect reference (pointer dereference) */
-    if (TREE_CODE(array_base) != MEM_REF && TREE_CODE(array_base) != INDIRECT_REF) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    tree pointer_expr = TREE_OPERAND(array_base, 0);
-    if (!pointer_expr) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    /* Check if this is a component reference (struct member access) */
-    if (TREE_CODE(pointer_expr) != COMPONENT_REF) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    tree field = TREE_OPERAND(pointer_expr, 1);
-    tree struct_base = TREE_OPERAND(pointer_expr, 0);
+    enum tree_code code = TREE_CODE(expr);
     
-    if (!field || TREE_CODE(field) != FIELD_DECL) {
-        return ERR_WEAK_ASSERTION;
+    switch (code) {
+        case ARRAY_REF:
+            TRY_WEAK(analyze_array_access(expr, stmt, access_mode));
+            break;
+            
+        case MEM_REF:
+        case INDIRECT_REF:
+            TRY_WEAK(analyze_mem_ref(expr, stmt, access_mode));
+            break;
+            
+        case COMPONENT_REF:
+            TRY_WEAK(analyze_component_ref(expr, stmt, access_mode));
+            break;
+            
+        case POINTER_PLUS_EXPR:
+        case PLUS_EXPR:
+        case MINUS_EXPR:
+            /* Analyze operands of arithmetic expressions */
+            for (int i = 0; i < TREE_OPERAND_LENGTH(expr); i++) {
+                tree operand = TREE_OPERAND(expr, i);
+                if (operand) {
+                    TRY_WEAK(analyze_expression_tree(operand, stmt, access_mode));
+                }
+            }
+            break;
+            
+        case VAR_DECL:
+        case PARM_DECL:
+            /* Check if this is a pointer or array variable */
+            if (is_pointer_type(TREE_TYPE(expr)) || is_array_type(TREE_TYPE(expr))) {
+                TRY_WEAK(analyze_pointer_access(expr, stmt, access_mode));
+            }
+            break;
+            
+        default:
+            /* For other expression types, recursively analyze operands */
+            for (int i = 0; i < TREE_OPERAND_LENGTH(expr); i++) {
+                tree operand = TREE_OPERAND(expr, i);
+                if (operand) {
+                    TRY_WEAK(analyze_expression_tree(operand, stmt, access_mode));
+                }
+            }
+            break;
     }
-
-    tree struct_type_node = TREE_TYPE(struct_base);
-    if (!struct_type_node) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    /* Check if the field is indeed a pointer type */
-    tree field_type = TREE_TYPE(field);
-    if (!field_type || TREE_CODE(field_type) != POINTER_TYPE) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    tree pointed_type = TREE_TYPE(field_type);
-    if (!pointed_type) {
-        return ERR_WEAK_ASSERTION;
-    }
-
-    /* Set output parameters */
-    if (struct_type) *struct_type = struct_type_node;
-    if (field_decl) *field_decl = field;
-    if (element_type) *element_type = pointed_type;
-    if (access_mode) *access_mode = ACCESS_READ; /* Default to read, will be updated by caller */
-
-    DEBUG_TRACE("Found indirect array access pattern");
+    
     return ERR_SUCCESS;
 }
 
-/* Find the statement that accesses the struct member (pointer field) */
-long long pointer_access_analyzer::find_related_member_access(tree base_expr, gimple **member_stmt)
+/* Analyze array access patterns */
+long long pointer_access_analyzer::analyze_array_access(tree expr, gimple *stmt, enum access_type access_mode)
 {
-    if (!base_expr || !member_stmt) {
+    if (!expr || TREE_CODE(expr) != ARRAY_REF) {
         return ERR_INVALID_INPUT;
     }
 
-    /* For simplicity, we'll return the current statement context */
-    /* In a more sophisticated implementation, we'd traverse the CFG */
-    *member_stmt = NULL; /* Will be set by the caller */
+    DEBUG_TRACE("Found ARRAY_REF pattern");
+    total_array_accesses++;
+
+    tree array_base = TREE_OPERAND(expr, 0);
+    tree array_index = TREE_OPERAND(expr, 1);
+    
+    access_tuple tuple;
+    tuple.access_expr = expr;
+    tuple.base_expr = array_base;
+    tuple.stmt = stmt;
+    tuple.access_mode = access_mode;
+    tuple.pattern = PATTERN_DIRECT_ARRAY;
+    tuple.pointed_element_type = TREE_TYPE(expr);
+    
+    /* Check if the array base involves a component reference */
+    if (array_base && TREE_CODE(array_base) == COMPONENT_REF) {
+        tree field = TREE_OPERAND(array_base, 1);
+        tree object = TREE_OPERAND(array_base, 0);
+        
+        tuple.field_decl = field;
+        tuple.struct_type = TREE_TYPE(object);
+        tuple.pattern = PATTERN_MEMBER_ARRAY;
+        
+        DEBUG_TRACE("Array access through struct member");
+    }
+    /* Check if the array base is a pointer dereference */
+    else if (array_base && (TREE_CODE(array_base) == MEM_REF || TREE_CODE(array_base) == INDIRECT_REF)) {
+        tuple.pattern = PATTERN_INDIRECT_ARRAY;
+        DEBUG_TRACE("Indirect array access through pointer");
+        
+        /* Analyze the pointer expression */
+        tree pointer_expr = TREE_OPERAND(array_base, 0);
+        if (pointer_expr && TREE_CODE(pointer_expr) == COMPONENT_REF) {
+            tree field = TREE_OPERAND(pointer_expr, 1);
+            tree object = TREE_OPERAND(pointer_expr, 0);
+            
+            tuple.field_decl = field;
+            tuple.struct_type = TREE_TYPE(object);
+            
+            DEBUG_TRACE("Indirect array access through struct member pointer");
+        }
+    }
+    
+    TRY(add_access_tuple(tuple));
+    
+    /* Recursively analyze the array base and index */
+    TRY_WEAK(analyze_expression_tree(array_base, stmt, ACCESS_READ));
+    TRY_WEAK(analyze_expression_tree(array_index, stmt, ACCESS_READ));
+    
+    return ERR_SUCCESS;
+}
+
+/* Analyze pointer access patterns */
+long long pointer_access_analyzer::analyze_pointer_access(tree expr, gimple *stmt, enum access_type access_mode)
+{
+    if (!expr) {
+        return ERR_INVALID_INPUT;
+    }
+
+    tree expr_type = TREE_TYPE(expr);
+    if (!is_pointer_type(expr_type) && !is_array_type(expr_type)) {
+        return ERR_WEAK_ASSERTION;
+    }
+
+    DEBUG_TRACE("Found pointer/array variable access");
+    total_pointer_accesses++;
+
+    access_tuple tuple;
+    tuple.access_expr = expr;
+    tuple.base_expr = expr;
+    tuple.stmt = stmt;
+    tuple.access_mode = access_mode;
+    tuple.pattern = PATTERN_POINTER_DEREF;
+    
+    if (is_pointer_type(expr_type)) {
+        tuple.pointed_element_type = TREE_TYPE(expr_type);
+    } else if (is_array_type(expr_type)) {
+        tuple.pointed_element_type = TREE_TYPE(expr_type);
+        tuple.pattern = PATTERN_DIRECT_ARRAY;
+    }
+    
+    TRY(add_access_tuple(tuple));
+    
+    return ERR_SUCCESS;
+}
+
+/* Analyze component reference (struct member access) */
+long long pointer_access_analyzer::analyze_component_ref(tree expr, gimple *stmt, enum access_type access_mode)
+{
+    if (!expr || TREE_CODE(expr) != COMPONENT_REF) {
+        return ERR_INVALID_INPUT;
+    }
+
+    DEBUG_TRACE("Found COMPONENT_REF pattern");
+
+    tree field = TREE_OPERAND(expr, 1);
+    tree object = TREE_OPERAND(expr, 0);
+    
+    tree field_type = TREE_TYPE(field);
+    
+    /* Check if this is accessing a pointer or array member */
+    if (is_pointer_type(field_type) || is_array_type(field_type)) {
+        access_tuple tuple;
+        tuple.access_expr = expr;
+        tuple.base_expr = object;
+        tuple.field_decl = field;
+        tuple.struct_type = TREE_TYPE(object);
+        tuple.stmt = stmt;
+        tuple.access_mode = access_mode;
+        
+        if (is_pointer_type(field_type)) {
+            tuple.pattern = PATTERN_MEMBER_POINTER;
+            tuple.pointed_element_type = TREE_TYPE(field_type);
+        } else {
+            tuple.pattern = PATTERN_MEMBER_ARRAY;
+            tuple.pointed_element_type = TREE_TYPE(field_type);
+        }
+        
+        TRY(add_access_tuple(tuple));
+        DEBUG_TRACE("Struct member pointer/array access");
+    }
+    
+    /* Recursively analyze the object */
+    TRY_WEAK(analyze_expression_tree(object, stmt, ACCESS_READ));
+    
+    return ERR_SUCCESS;
+}
+
+/* Analyze memory reference (pointer dereference) */
+long long pointer_access_analyzer::analyze_mem_ref(tree expr, gimple *stmt, enum access_type access_mode)
+{
+    if (!expr || (TREE_CODE(expr) != MEM_REF && TREE_CODE(expr) != INDIRECT_REF)) {
+        return ERR_INVALID_INPUT;
+    }
+
+    DEBUG_TRACE("Found MEM_REF/INDIRECT_REF pattern");
+
+    tree pointer_expr = TREE_OPERAND(expr, 0);
+    
+    access_tuple tuple;
+    tuple.access_expr = expr;
+    tuple.base_expr = pointer_expr;
+    tuple.stmt = stmt;
+    tuple.access_mode = access_mode;
+    tuple.pattern = PATTERN_POINTER_DEREF;
+    tuple.pointed_element_type = TREE_TYPE(expr);
+    
+    /* Check if the pointer is a component reference */
+    if (pointer_expr && TREE_CODE(pointer_expr) == COMPONENT_REF) {
+        tree field = TREE_OPERAND(pointer_expr, 1);
+        tree object = TREE_OPERAND(pointer_expr, 0);
+        
+        tuple.field_decl = field;
+        tuple.struct_type = TREE_TYPE(object);
+        
+        DEBUG_TRACE("Pointer dereference through struct member");
+    }
+    
+    TRY(add_access_tuple(tuple));
+    
+    /* Recursively analyze the pointer expression */
+    TRY_WEAK(analyze_expression_tree(pointer_expr, stmt, ACCESS_READ));
     
     return ERR_SUCCESS;
 }
 
 /* Add an access tuple to the collection */
-long long pointer_access_analyzer::add_access_tuple(tree struct_type, tree field_decl, tree element_type,
-                                                   gimple *member_stmt, gimple *element_stmt, enum access_type mode)
+long long pointer_access_analyzer::add_access_tuple(const access_tuple &tuple)
 {
-    access_tuple tuple;
-    tuple.struct_type = struct_type;
-    tuple.field_decl = field_decl;
-    tuple.pointed_element_type = element_type;
-    tuple.member_access_stmt = member_stmt;
-    tuple.element_access_stmt = element_stmt;
-    tuple.access_mode = mode;
-    
     collected_accesses.safe_push(tuple);
     return ERR_SUCCESS;
+}
+
+/* Type checking utilities */
+bool pointer_access_analyzer::is_struct_type(tree type) const
+{
+    return type && (TREE_CODE(type) == RECORD_TYPE || TREE_CODE(type) == UNION_TYPE);
+}
+
+bool pointer_access_analyzer::is_pointer_type(tree type) const
+{
+    return type && TREE_CODE(type) == POINTER_TYPE;
+}
+
+bool pointer_access_analyzer::is_array_type(tree type) const
+{
+    return type && TREE_CODE(type) == ARRAY_TYPE;
 }
 
 /* Convert access type to string for output */
@@ -363,12 +545,40 @@ const char *pointer_access_analyzer::access_type_to_string(enum access_type type
     }
 }
 
+/* Convert pattern type to string for output */
+const char *pointer_access_analyzer::pattern_type_to_string(enum pattern_type type) const
+{
+    switch (type) {
+        case PATTERN_DIRECT_ARRAY: return "DIRECT_ARRAY";
+        case PATTERN_POINTER_DEREF: return "POINTER_DEREF";
+        case PATTERN_MEMBER_ARRAY: return "MEMBER_ARRAY";
+        case PATTERN_MEMBER_POINTER: return "MEMBER_POINTER";
+        case PATTERN_INDIRECT_ARRAY: return "INDIRECT_ARRAY";
+        default: return "UNKNOWN";
+    }
+}
+
+/* Debug print tree structure */
+void pointer_access_analyzer::print_tree_debug(tree expr, const char *prefix) const
+{
+    if (!expr) {
+        printf("%s<NULL>\n", prefix);
+        return;
+    }
+    
+    printf("%s", prefix);
+    print_generic_expr(stdout, expr, TDF_SLIM);
+    printf(" (%s)\n", get_tree_code_name(TREE_CODE(expr)));
+}
+
 /* Print collected access tuple information */
 void pointer_access_analyzer::print_access_tuple(const access_tuple *tuple) const
 {
     if (!tuple) return;
 
     printf("=== Access Tuple ===\n");
+    printf("Pattern: %s\n", pattern_type_to_string(tuple->pattern));
+    printf("Access Mode: %s\n", access_type_to_string(tuple->access_mode));
     
     if (tuple->struct_type) {
         printf("Struct Type: ");
@@ -388,16 +598,21 @@ void pointer_access_analyzer::print_access_tuple(const access_tuple *tuple) cons
         printf("\n");
     }
     
-    printf("Access Mode: %s\n", access_type_to_string(tuple->access_mode));
-    
-    if (tuple->member_access_stmt) {
-        printf("Member Access Statement: ");
-        print_gimple_stmt(stdout, tuple->member_access_stmt, 0, TDF_SLIM);
+    if (tuple->access_expr) {
+        printf("Access Expression: ");
+        print_generic_expr(stdout, tuple->access_expr, TDF_SLIM);
+        printf("\n");
     }
     
-    if (tuple->element_access_stmt) {
-        printf("Element Access Statement: ");
-        print_gimple_stmt(stdout, tuple->element_access_stmt, 0, TDF_SLIM);
+    if (tuple->base_expr) {
+        printf("Base Expression: ");
+        print_generic_expr(stdout, tuple->base_expr, TDF_SLIM);
+        printf("\n");
+    }
+    
+    if (tuple->stmt) {
+        printf("Statement: ");
+        print_gimple_stmt(stdout, tuple->stmt, 0, TDF_SLIM);
     }
     
     printf("====================\n\n");
@@ -409,6 +624,8 @@ void pointer_access_analyzer::print_results() const
     printf("\n=== POINTER ACCESS ANALYSIS RESULTS ===\n");
     printf("Total functions analyzed: %u\n", total_functions_analyzed);
     printf("Total statements analyzed: %u\n", total_statements_analyzed);
+    printf("Total array accesses found: %u\n", total_array_accesses);
+    printf("Total pointer accesses found: %u\n", total_pointer_accesses);
     printf("Total collected accesses: %u\n\n", collected_accesses.length());
     
     unsigned int i;
@@ -445,10 +662,10 @@ static unsigned int execute_pointer_access_analysis(void)
 /* Define the IPA pass structure */
 namespace {
     const pass_data pass_data_pointer_access_analysis = {
-        IPA_PASS,                    /* type */
+        IPA_PASS,                           /* type */
         "pointer_access_analysis",          /* name */
         OPTGROUP_NONE,                      /* optinfo_flags */
-        TV_NONE,                        /* tv_id */
+        TV_NONE,                           /* tv_id */
         0,                                  /* properties_required */
         0,                                  /* properties_provided */
         0,                                  /* properties_destroyed */
@@ -469,7 +686,7 @@ namespace {
                          0,     // function_transform_todo_flags_start
                          NULL,  // function_transform
                          NULL)  // variable_transform
-{}
+        {}
 
         virtual unsigned int execute(function *) override {
             return execute_pointer_access_analysis();
@@ -487,10 +704,10 @@ int plugin_init(struct plugin_name_args *plugin_info,
         return 1;
     }
 
-    /* Register the pass without reference to other passes */
+    /* Register the pass */
     struct register_pass_info pass_info = {
         .pass = new pass_pointer_access_analysis(g),
-        .reference_pass_name = "whole-program",        /* No reference pass - insert at end */
+        .reference_pass_name = "whole-program",
         .ref_pass_instance_number = 1,
         .pos_op = PASS_POS_INSERT_AFTER
     };
