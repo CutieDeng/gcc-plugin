@@ -382,7 +382,7 @@ int plugin_init(struct plugin_name_args *plugin_info,
     struct register_pass_info pass_info;
     pass_info.pass = new double_pointer_access_pass(g);
     pass_info.reference_pass_name = "whole-program";
-    pass_info.ref_pass_instance_number = 0;
+    pass_info.ref_pass_instance_number = 1;
     pass_info.pos_op = PASS_POS_INSERT_AFTER;
     
     register_callback(plugin_name, PLUGIN_PASS_MANAGER_SETUP,
