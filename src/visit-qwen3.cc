@@ -3,12 +3,73 @@
 #include <tree.h>
 #include <gimple.h>
 #include <tree-pass.h>
+#include <gimple-iterator.h>
+#include <context.h>
 
 int plugin_is_GPL_compatible;
 
+// 分析GIMPLE语句
+static void analyze_gimple_stmt(gimple *stmt) {
+    enum gimple_code code = gimple_code(stmt);
+    
+    switch (code) {
+        case GIMPLE_ASSIGN:
+            // 处理赋值语句
+            if (gimple_num_ops(stmt) >= 2) {
+                tree lhs = gimple_assign_lhs(stmt);
+                tree rhs = gimple_assign_rhs1(stmt);
+                
+                // 检查是否涉及指针
+                if (POINTER_TYPE_P(TREE_TYPE(lhs)) || POINTER_TYPE_P(TREE_TYPE(rhs))) {
+                    fprintf(stderr, "  发现指针赋值: ");
+                    print_generic_expr(stderr, lhs, 0);
+                    fprintf(stderr, " = ");
+                    print_generic_expr(stderr, rhs, 0);
+                    fprintf(stderr, "\n");
+                }
+            }
+            break;
+            
+        case GIMPLE_CALL:
+            // 处理函数调用
+            {
+                tree fn = gimple_call_fn(stmt);
+                if (fn) {
+                    fprintf(stderr, "  函数调用: ");
+                    print_generic_expr(stderr, fn, 0);
+                    fprintf(stderr, "\n");
+                }
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+// 遍历基本块中的语句
+static void analyze_basic_block_basic(basic_block bb) {
+    gimple_stmt_iterator gsi;
+    for (gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi)) {
+        gimple *stmt = gsi_stmt(gsi);
+        analyze_gimple_stmt(stmt);
+    }
+}
+
 // PASS执行函数
 static unsigned int execute_ptr_access_pass(void) {
-    fprintf(stderr, "插件执行成功\n");
+    if (!cfun) return 0;
+    
+    fprintf(stderr, "分析函数: %s\n", 
+            (DECL_NAME(current_function_decl)) ? 
+            IDENTIFIER_POINTER(DECL_NAME(current_function_decl)) : "unknown");
+    
+    // 遍历所有基本块
+    basic_block bb;
+    FOR_EACH_BB_FN(bb, cfun) {
+        analyze_basic_block_basic(bb);
+    }
+    
     return 0;
 }
 
@@ -57,5 +118,3 @@ int plugin_init(struct plugin_name_args *plugin_info,
     
     return 0;
 }
-
-// 插件信息
