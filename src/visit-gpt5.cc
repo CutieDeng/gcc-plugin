@@ -13,8 +13,8 @@
 #include "stringpool.h"
 #include "vec.h"
 #include "hash-table.h"
-#include "symbol-summary.h"
-#include "ipa-pass.h"
+#include "symtab.h"
+#include "tree-pass.h"   // ⚠️ 正确的 pass API 头文件
 
 int plugin_is_GPL_compatible;
 
