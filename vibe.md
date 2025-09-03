@@ -30,9 +30,11 @@ ErrorIo: IO 错误
 定义模式函数开头宏 `#define PATTERN_BEGIN err_t ret = ErrorOk;` （根据具体模式情形增加内容）
 定义模式安全返回宏 `#define PATTERN_SAFE_CHECK_STRONG() do { if (ret != ErrorOk) { return ret; } } while (0)`
 定义模式弱安全返回宏，`#define PATTERN_SAFE_CHECK_WEAK() ...` 即使在弱失败断言下仍继续执行，而不是直接返回
-定义模式匹配计算宏 `#define PATTERN_MATCH(x, y, e) if (x == 0) x = y; else (x != y) ret = e;` （在 x 是零值时，将其赋 y 值；否则，执行比较，如果比较不等，则设置错误码 e. 并定义两个额外的宏用于控制是强失败 PATTERN_MATCH_STRONG，还是弱失败 PATTERN_MATCH_WEAK）
-定义模式函数结尾宏 `#define PATTERN_END return ret;`
+定义模式匹配计算宏 `#define PATTERN_MATCH(x, y, e) if ((x) == 0) { (x) = (y); } else ((x) != (y)) { ret = (e); }` （在 x 是零值时，将其赋 y 值；否则，执行比较，如果比较不等，则设置错误码 e. 并定义两个额外的宏用于控制是强失败 PATTERN_MATCH_STRONG，还是弱失败 PATTERN_MATCH_WEAK）
+定义模式执行宏 `#define PATTERN_WRAP (x) do { ret |= (x); } while (0)`
+定义模式函数结尾宏 `#define PATTERN_END do { return ret; } while (0);`
 定义调试信息宏 `#define DEBUG(fmt, ...) ...` 输出调试信息，并附上 filepath:lineno fnname 的代码位置前缀
+以上宏定义代码均为简要描述，需要根据实际代码规范和上下文给出完整正确实现。
 ## IO 处理
 只使用 libc 或低于该抽象层级的输入、输出接口，例如 `printf`.
 ## 缩进规范
