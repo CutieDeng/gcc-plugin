@@ -1,225 +1,254 @@
 #include <gcc-plugin.h>
+#include <plugin-version.h>
 #include <tree.h>
 #include <gimple.h>
-#include <tree-pass.h>
-#include <gimple-iterator.h>
 #include <basic-block.h>
-#include <vec.h>
+#include <function.h>
+#include <diagnostic.h>
 #include <hashtab.h>
+#include <vec.h>
 // #include <ipa-pass.h>
-#include <tree-pretty-print.h>
+#include <cgraph.h>
+#include <tree-ssa-alias.h>
+#include <gimple-iterator.h>
+#include <tree-eh.h>
+#include <tree-pass.h>
+#include <context.h>
+#include <stringpool.h>
 #include <print-tree.h>
 
-int plugin_is_GPL_compatible;
-
-// 错误码定义
+// 遵循 vibe code style 的错误码定义
 using err_t = long long;
+
 enum error_type : err_t {
     ErrorOk = 0,
-    ErrorWeakAssert = 1,
-    ErrorStrongAssert = 2,
-    ErrorGccLogic = 4,
-    ErrorCustomLogic = 8,
-    ErrorMemResource = 16,
-    ErrorIo = 32,
-    ErrorGc = 64,
+    ErrorWeakAssert = 1LL << 0,
+    ErrorStrongAssert = 1LL << 1,
+    ErrorGccLogic = 1LL << 2,
+    ErrorCustomLogic = 1LL << 3,
+    ErrorMemResource = 1LL << 4,
+    ErrorIo = 1LL << 5,
+    ErrorGc = 1LL << 6,
 };
 
-// 宏定义
+// 宏定义部分
 #define PATTERN_BEGIN err_t ret = ErrorOk;
-#define PATTERN_SAFE_CHECK_LABEL(allow_error, label) do { \
-    if (ret != ErrorOk && ret != (allow_error)) { goto fn_final; } \
-} while (0)
-#define PATTERN_SAFE_CHECK_STRONG_LABEL(label) PATTERN_SAFE_CHECK_LABEL(ErrorOk, label)
-#define PATTERN_SAFE_CHECK_WEAK_LABEL(label) PATTERN_SAFE_CHECK_LABEL(ErrorWeakAssert, label)
+#define PATTERN_SAFE_CHECK_LABEL(allow_error, label) do { if (ret != ErrorOk && ret != (allow_error)) { goto label; } } while (0)
+#define PATTERN_SAFE_CHECK_STRONG_LABEL(label) PATTERN_SAFE_CHECK_LABEL (ErrorOk, label)
+#define PATTERN_SAFE_CHECK_WEAK_LABEL(label) PATTERN_SAFE_CHECK_LABEL (ErrorWeakAssert, label)
 #define PATTERN_SAFE_CHECK_STRONG() PATTERN_SAFE_CHECK_STRONG_LABEL(fn_final)
 #define PATTERN_SAFE_CHECK_WEAK() PATTERN_SAFE_CHECK_WEAK_LABEL(fn_final)
-#define PATTERN_MATCH_RAW(x, y, e) do { \
-    if ((x) == 0) { (x) = (y); } else if ((x) != (y)) { ret = (e); } \
-} while (0)
+#define PATTERN_MATCH_RAW(x, y, e) do { if ((x) == 0) { (x) = (y); } else if ((x) != (y)) { ret = (e); } } while (0)
 #define PATTERN_MATCH_STRONG(x, y) PATTERN_MATCH_RAW(x, y, ErrorStrongAssert)
 #define PATTERN_MATCH_WEAK(x, y) PATTERN_MATCH_RAW(x, y, ErrorWeakAssert)
 #define PATTERN_WRAP(x) do { ret |= (x); } while (0)
-#define PATTERN_END do { fn_final: return ret; } while (0)
+#define PATTERN_END do { fn_final: return ret; } while (0);
 #define DEBUG(fmt, ...) fprintf(stderr, "[DEBUG] %s:%d %s: " fmt "\n", __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__)
 #define PATTERN_STRIP_WEAK() do { ret &= ~ErrorWeakAssert; } while (0)
 
-// 前向声明
-struct Analysis;
-err_t Analysis_init(Analysis& self);
-err_t Analysis_run(Analysis& self);
+// 插件版本和信息
+int plugin_is_GPL_compatible;
 
-// Vector类型信息结构
-struct VectorTypeInfo {
-    tree type_decl;         // 结构体类型的TREE_DECL
-    tree ptr_field;         // ptr字段
-    tree size_field;        // size字段
-    tree capacity_field;    // capacity字段
+static struct plugin_info vector_pattern_plugin_info = {
+    .version = "1.0",
+    .help = "GCC Plugin for Vector Pattern Recognition in LTO IPA stage"
 };
 
-// 访问行为记录
-struct AccessRecord {
-    const char* function_name;
-    const char* gimple_stmt;
-    const char* location;
-    basic_block bb;
-};
-
-// 分析结果
-struct VectorCandidate {
-    VectorTypeInfo type_info;
-    bool size_vs_capacity_valid;
-    bool index_vs_size_valid;
-    vec<AccessRecord> access_records;
-    bool pointer_escapes;
-    bool verified;
-};
-
-// 主分析结构
+// 分析状态管理结构体 (Analysis Object)
 struct Analysis {
-    vec<VectorCandidate> candidates;
-    hash_table<nofree_ptr_hash> visited_types;
-    
-    err_t init();
-    err_t process_function(tree fn);
-    err_t identify_candidates();
-    err_t analyze_escape(tree type, tree ptr_field);
-    err_t verify_candidate(VectorCandidate& candidate);
-    err_t output_results();
+    bool initialized;
+    vec<tree> candidate_types;
+    vec<gimple *> access_patterns;
 };
 
-// 初始化分析器
-err_t Analysis::init() {
+static struct Analysis g_analysis;
+
+// 初始化函数替代构造器
+static err_t Analysis_init(struct Analysis *self) {
     PATTERN_BEGIN
-    candidates.create(0);
-    PATTERN_SAFE_CHECK_STRONG()
-    visited_types.create();
+    
+    self->initialized = true;
+    self->candidate_types.create(0);
+    self->access_patterns.create(0);
+    
     PATTERN_END
 }
 
-// 处理单个函数
-err_t Analysis::process_function(tree fn) {
-    PATTERN_BEGIN
-    if (fn == NULL_TREE || ! DECL_STRUCT_FUNCTION(fn)) {
-        ret = ErrorWeakAssert;
-        PATTERN_SAFE_CHECK_WEAK();
-        goto fn_final;
+// 检查一个类型是否是结构体，并且有三个字段
+static bool is_struct_with_three_fields(tree type) {
+    if (TREE_CODE(type) != RECORD_TYPE)
+        return false;
+    
+    tree field = TYPE_FIELDS(type);
+    int count = 0;
+    while (field != NULL_TREE) {
+        if (TREE_CODE(field) == FIELD_DECL)
+            count++;
+        field = DECL_CHAIN(field);
     }
+    
+    return count == 3;
+}
 
+// 检查结构体是否包含指针、size、capacity字段
+static err_t check_vector_fields(tree type, tree *ptr_field, tree *size_field, tree *capacity_field) {
+    PATTERN_BEGIN
+    
+    *ptr_field = NULL_TREE;
+    *size_field = NULL_TREE;
+    *capacity_field = NULL_TREE;
+    
+    tree field = TYPE_FIELDS(type);
+    while (field != NULL_TREE) {
+        if (TREE_CODE(field) == FIELD_DECL) {
+            tree field_type = TREE_TYPE(field);
+            if (TREE_CODE(field_type) == POINTER_TYPE) {
+                PATTERN_MATCH_WEAK(*ptr_field, NULL_TREE) // 确保只有一个指针字段
+                *ptr_field = field;
+            } else if (TREE_CODE(field_type) == INTEGER_TYPE) {
+                const char *name = IDENTIFIER_POINTER(DECL_NAME(field));
+                if (strstr(name, "size") || strstr(name, "len")) {
+                    PATTERN_MATCH_WEAK(*size_field, NULL_TREE)
+                    *size_field = field;
+                } else if (strstr(name, "capacity") || strstr(name, "cap")) {
+                    PATTERN_MATCH_WEAK(*capacity_field, NULL_TREE)
+                    *capacity_field = field;
+                }
+            }
+        }
+        field = DECL_CHAIN(field);
+    }
+    
+    // 必须找到这三个字段
+    if (!*ptr_field || !*size_field || !*capacity_field) {
+        ret = ErrorWeakAssert;
+    }
+    
+    PATTERN_END
+}
+
+// 在函数中查找MEM_REF访问模式
+static err_t analyze_function_for_access_patterns(struct function *fn, struct Analysis *analysis) {
+    PATTERN_BEGIN
+    
+    if (!fn || !fn->gimple_body) {
+        ret = ErrorWeakAssert;
+        PATTERN_SAFE_CHECK_WEAK()
+    }
+    
     basic_block bb;
-    FOR_EACH_BB_FN(bb, DECL_STRUCT_FUNCTION(fn)) {
+    FOR_EACH_BB_FN(bb, fn) {
         gimple_stmt_iterator gsi;
         for (gsi = gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi)) {
-            gimple* stmt = gsi_stmt(gsi);
-            // TODO: 分析GIMPLE语句以识别访问模式
+            gimple *stmt = gsi_stmt(gsi);
+            if (gimple_code(stmt) == GIMPLE_ASSIGN) {
+                tree rhs = gimple_assign_rhs1(stmt);
+                if (TREE_CODE(rhs) == MEM_REF) {
+                    // 记录潜在的访问模式
+                    analysis->access_patterns.safe_push(stmt);
+                }
+            }
         }
     }
-    PATTERN_END
-}
-
-// 识别候选向量类型
-err_t Analysis::identify_candidates() {
-    PATTERN_BEGIN
-    // 遍历所有定义的类型
-    // 检查是否包含三个核心字段
-    // 收集候选类型
-    PATTERN_END
-}
-
-// 分析指针逃逸
-err_t Analysis::analyze_escape(tree type, tree ptr_field) {
-    PATTERN_BEGIN
-    // 分析指针是否逃逸
-    PATTERN_END
-}
-
-// 验证候选类型
-err_t Analysis::verify_candidate(VectorCandidate& candidate) {
-    PATTERN_BEGIN
-    // 执行验证逻辑
-    PATTERN_END
-}
-
-// 输出结果
-err_t Analysis::output_results() {
-    PATTERN_BEGIN
-    printf("{\n");
-    printf("  \"vector_candidates\": [\n");
-    for (size_t i = 0; i < candidates.length(); ++i) {
-        // 输出候选类型信息
-    }
-    printf("  ]\n");
-    printf("}\n");
-    PATTERN_END
-}
-
-// 主分析函数
-err_t Analysis_run(Analysis& self) {
-    PATTERN_BEGIN
-    PATTERN_WRAP(self.init())
-    PATTERN_SAFE_CHECK_STRONG()
     
-    // 遍历所有函数进行分析
-    struct cgraph_node* node;
+    PATTERN_END
+}
+
+// 逃逸分析：检查指针字段是否逃逸
+static err_t perform_escape_analysis(tree ptr_field, struct Analysis *analysis) {
+    PATTERN_BEGIN
+    
+    // TODO: 实现完整的逃逸分析逻辑
+    // 这里简化处理，仅作示意
+    
+    PATTERN_END
+}
+
+// 收集候选类型
+static err_t collect_candidate_types(struct Analysis *analysis) {
+    PATTERN_BEGIN
+    
+    // 遍历所有已知类型
+    // 这里简化实现，实际应该通过IPA遍历所有可达函数和类型
+    
+    PATTERN_END
+}
+
+// 主分析流程
+static err_t perform_vector_pattern_analysis(struct Analysis *analysis) {
+    PATTERN_BEGIN
+    
+    PATTERN_WRAP(collect_candidate_types(analysis))
+    PATTERN_SAFE_CHECK_WEAK()
+    
+    // 遍历所有函数进行访问模式分析
+    struct cgraph_node *node;
     FOR_EACH_FUNCTION(node) {
-        PATTERN_WRAP(self.process_function(node->decl))
-        PATTERN_SAFE_CHECK_STRONG()
+        if (node->definition) {
+            push_cfun(node-> decl);
+            PATTERN_WRAP(analyze_function_for_access_patterns(cfun, analysis))
+            pop_cfun();
+            PATTERN_SAFE_CHECK_WEAK()
+        }
     }
     
-    PATTERN_WRAP(self.identify_candidates())
-    PATTERN_SAFE_CHECK_STRONG()
-    
-    // 验证候选类型
-    for (size_t i = 0; i < self.candidates.length(); ++i) {
-        PATTERN_WRAP(self.verify_candidate(self.candidates[i]))
-        PATTERN_SAFE_CHECK_STRONG()
+    // 对每个候选类型进行逃逸分析
+    for (unsigned i = 0; i < analysis->candidate_types.length(); ++i) {
+        tree type = analysis->candidate_types[i];
+        tree ptr_field, size_field, capacity_field;
+        
+        PATTERN_WRAP(check_vector_fields(type, &ptr_field, &size_field, &capacity_field))
+        PATTERN_SAFE_CHECK_WEAK()
+        
+        PATTERN_WRAP(perform_escape_analysis(ptr_field, analysis))
+        PATTERN_SAFE_CHECK_WEAK()
     }
     
-    PATTERN_WRAP(self.output_results())
-    PATTERN_SAFE_CHECK_STRONG()
     PATTERN_END
 }
 
-// IPA Pass回调函数
-static unsigned int vector_pattern_execute(void) {
+// 插件执行回调
+static void vector_pattern_execute(void *gcc_data, void *user_data) {
     PATTERN_BEGIN
-    Analysis analysis;
-    PATTERN_WRAP(Analysis_run(analysis))
-    PATTERN_SAFE_CHECK_STRONG()
-    PATTERN_END
+    
+    DEBUG("Starting vector pattern recognition");
+    
+    // 确保Analysis已初始化
+    if (!g_analysis.initialized) {
+        PATTERN_WRAP(Analysis_init(&g_analysis))
+        PATTERN_SAFE_CHECK_STRONG()
+    }
+    
+    // 执行分析
+    PATTERN_WRAP(perform_vector_pattern_analysis(&g_analysis))
+    PATTERN_SAFE_CHECK_WEAK()
+    
+    DEBUG("Vector pattern recognition completed");
+    
+    fn_final:
+        if (ret != ErrorOk) {
+            DEBUG("Analysis failed with error: %lld", ret);
+        }
+        return;
 }
 
 // 插件初始化
-static struct register_pass_info vector_pattern_pass_info = {
-    .pass = NULL,
-    .reference_pass_name = "whole-program",
-    .ref_pass_instance_number = 1,
-    .pos_op = PASS_POS_INSERT_AFTER,
-};
-
-// 插件入口点
-int plugin_init(struct plugin_name_args* info, struct plugin_gcc_version* version) {
+int plugin_init(struct plugin_name_args *plugin_info, struct plugin_gcc_version *version) {
+    PATTERN_BEGIN
+    
+    // 版本检查
     if (!plugin_default_version_check(version, &gcc_version)) {
-        return 1;
+        ret = ErrorStrongAssert;
+        PATTERN_SAFE_CHECK_STRONG()
     }
-
-    struct opt_pass* pass = ggc_cleared_alloc<opt_pass>();
-    pass->type = GIMPLE_PASS;
-    pass->name = "vector_pattern_recognition";
-    pass->gate = NULL;
-    pass->execute = vector_pattern_execute;
-    pass->sub = NULL;
-    pass->next = NULL;
-    pass->static_pass_number = 0;
-    pass->tv_id = TV_NONE;
-    pass->properties_required = 0;
-    pass->properties_provided = 0;
-    pass->properties_destroyed = 0;
-    pass->todo_flags_start = 0;
-    pass->todo_flags_finish = 0;
-
-    vector_pattern_pass_info.pass = pass;
-    register_callback(info->base_name, PLUGIN_PASS_MANAGER_SETUP, NULL, &vector_pattern_pass_info);
-
-    return 0;
+    
+    // 注册插件信息
+    register_callback(plugin_info->base_name, PLUGIN_INFO, NULL, &vector_pattern_plugin_info);
+    
+    // 注册到IPA阶段开始时执行
+    register_callback(plugin_info->base_name, PLUGIN_ALL_IPA_PASSES_START, vector_pattern_execute, NULL);
+    
+    DEBUG("Vector pattern recognition plugin registered");
+    
+    PATTERN_END
 }
