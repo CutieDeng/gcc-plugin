@@ -123,7 +123,7 @@ err_t Analysis::add_candidate(tree type) {
   
     for (i = 0; i < candidate_count; i++) {
         if (candidates[i].type == type) {
-          goto fn_final;
+            goto fn_final;
         }
     }
   
@@ -193,7 +193,7 @@ err_t Analysis::check_mem_ref(tree expr, char const *fn_name, gimple *stmt) {
     tree record_type;
   
     if (!expr || TREE_CODE(expr) != MEM_REF) {
-      goto fn_final;
+        goto fn_final;
     }
   
     base = TREE_OPERAND(expr, 0);
@@ -279,12 +279,12 @@ err_t Analysis::check_comparisons(gimple *stmt) {
     enum tree_code code;
   
     if (!is_gimple_assign(stmt)) {
-      goto fn_final;
+        goto fn_final;
     }
   
     code = gimple_assign_rhs_code(stmt);
     if (code != LT_EXPR && code != LE_EXPR && code != GT_EXPR && code != GE_EXPR) {
-      goto fn_final;
+        goto fn_final;
     }
   
     lhs = gimple_assign_rhs1(stmt);
@@ -319,7 +319,7 @@ err_t Analysis::analyze_gimple_stmt(gimple *stmt, char const *fn_name) {
     tree rhs;
   
     if (!stmt) {
-      goto fn_final;
+        goto fn_final;
     }
   
     if (is_gimple_assign(stmt)) {
@@ -347,12 +347,12 @@ err_t Analysis::analyze_function(cgraph_node *node) {
     char const *fn_name;
   
     if (!node || !node->has_gimple_body_p()) {
-      goto fn_final;
+        goto fn_final;
     }
   
     fn = DECL_STRUCT_FUNCTION(node->decl);
     if (!fn) {
-      goto fn_final;
+        goto fn_final;
     }
   
     fn_name = IDENTIFIER_POINTER(DECL_NAME(node->decl));
